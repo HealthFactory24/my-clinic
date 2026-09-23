@@ -195,7 +195,7 @@
     "db:pull": "drizzle-kit pull",
     "db:push": "drizzle-kit push",
     "db:reset": "bun src/lib/db/reset.ts",
-    "db:seed": "bun src/lib/db/seed.ts",
+    "db:seed": "bun src/scripts/seed.ts",
     "db:studio": "drizzle-kit studio",
     "db:up": "drizzle-kit up",
     "deps": "bunx taze@latest -Ilw --maturity-period 3",

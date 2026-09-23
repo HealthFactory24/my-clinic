@@ -35,7 +35,7 @@ import {
 	vitals
 } from "@/lib/db/schema";
 
-import { db, withTransaction } from "../lib/db/server";
+import { db, withTransaction, type DBorTx } from "../lib/db/server";
 
 // ============================================================
 // Configuration
@@ -93,12 +93,13 @@ async function loadBootstrap(): Promise<Bootstrap> {
 	};
 }
 async function insertBatched<T extends PgTable>(
+	executor: DBorTx,
 	table: T,
 	rows: PgInsertValue<T>[],
 	batchSize = INSERT_BATCH_SIZE
 ): Promise<void> {
 	for (let i = 0; i < rows.length; i += batchSize) {
-		await db.insert(table).values(rows.slice(i, i + batchSize));
+		await executor.insert(table).values(rows.slice(i, i + batchSize));
 	}
 }
 /** Deterministic-per-call unique string, namespaced by `prefix`. */
@@ -1542,27 +1543,27 @@ export async function seedDatabase(): Promise<void> {
 				.values(guardianRows.slice(i, i + INSERT_BATCH_SIZE));
 		}
 		if (allergyRows.length > 0)
-			await insertBatched(patientAllergies, allergyRows);
+			await insertBatched(tx, patientAllergies, allergyRows);
 		if (conditionRows.length > 0) {
-			await insertBatched(patientChronicConditions, conditionRows);
+			await insertBatched(tx, patientChronicConditions, conditionRows);
 		}
 		if (encounterRows.length > 0)
-			await insertBatched(encounters, encounterRows);
+			await insertBatched(tx, encounters, encounterRows);
 		if (appointmentRows.length > 0) {
-			await insertBatched(appointments, appointmentRows);
+			await insertBatched(tx, appointments, appointmentRows);
 		}
-		if (vitalRows.length > 0) await insertBatched(vitals, vitalRows);
+		if (vitalRows.length > 0) await insertBatched(tx, vitals, vitalRows);
 		if (growthRows.length > 0) {
-			await insertBatched(growthMeasurements, growthRows);
+			await insertBatched(tx, growthMeasurements, growthRows);
 		}
 		if (immunizationRows.length > 0) {
-			await insertBatched(immunizations, immunizationRows);
+			await insertBatched(tx, immunizations, immunizationRows);
 		}
 		if (prescriptionRows.length > 0) {
-			await insertBatched(prescriptions, prescriptionRows);
+			await insertBatched(tx, prescriptions, prescriptionRows);
 		}
-		if (labRows.length > 0) await insertBatched(labOrders, labRows);
-		if (auditRows.length > 0) await insertBatched(auditLogs, auditRows);
+		if (labRows.length > 0) await insertBatched(tx, labOrders, labRows);
+		if (auditRows.length > 0) await insertBatched(tx, auditLogs, auditRows);
 	});
 
 	console.log("  ✅ Inserted all demo rows");
