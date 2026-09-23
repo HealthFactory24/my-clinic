@@ -10,13 +10,13 @@ import {
 	twoFactorClient
 } from "better-auth/client/plugins";
 import { createAuthClient } from "better-auth/react";
-import { ENV } from "varlock/env";
 
+import { env } from "../../env/client";
 import type { auth } from "./auth";
 import { ac, roles } from "./roles";
 
 export const authClient = createAuthClient({
-	baseURL: ENV.VITE_BASE_URL,
+	baseURL: env.VITE_BASE_URL,
 
 	plugins: [
 		magicLinkClient(),

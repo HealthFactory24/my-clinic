@@ -1,6 +1,6 @@
 // oxlint-disable-next-line import/no-unassigned-import
 import "@tanstack/react-start/server-only";
-import { count } from "drizzle-orm";
+import { and, count, SQL } from "drizzle-orm";
 
 import { db, withTransaction } from "./server";
 
@@ -122,4 +122,18 @@ export async function clearAllTables(): Promise<void> {
 			await tx.delete(dbTableMap[table]);
 		}
 	});
+}
+export function combineConditions(
+	conditions: Array<SQL | undefined>
+): SQL | undefined {
+	const validConditions = conditions.filter(
+		(cond): cond is SQL => cond !== null && cond !== void 0
+	);
+	return validConditions.length > 0 ? and(...validConditions) : void 0;
+}
+
+export function readCount(
+	rows: ReadonlyArray<Record<string, unknown>> | undefined
+): number {
+	return Number(rows?.[0]?.count ?? 0);
 }

@@ -1,395 +1,434 @@
 // src/components/analytics/ClinicAnalytics.tsx
+"use client";
 
-import { AlertCircle, FlaskConical, Stethoscope, Users } from "lucide-react";
-import { useMemo } from "react";
+import type { ChartPositionScaleOptions } from "@tanstack/charts";
+import { areaY, barY, d3Curve, defineChart, lineY } from "@tanstack/charts";
+import { motion } from "@tanstack/charts/motion";
+import { RendererChart } from "@tanstack/charts/react/tooltip";
+import { tooltip } from "@tanstack/charts/tooltip";
+import { scaleBand, scaleLinear, scalePoint } from "d3-scale";
+import { curveMonotoneX, curveNatural } from "d3-shape";
+import * as React from "react";
 
-import {
-	useAllOverdueImmunizations,
-	useAllPatients,
-	useEncounterList,
-	useLabOrderList
-} from "../../hooks";
-import type { Encounter, LabOrder } from "../../lib/db/schema";
-import { calculatePediatricAge } from "../../utils";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 
-// ─── Constants ──────────────────────────────────────────────────────────────
+import { useClinicInsights } from "../../hooks/use-analytics";
+import type { ClinicInsight, InsightSeriesPoint } from "../../types/insights";
+import { formatCount } from "../intro-page/format-pedia-age";
+import { TrendBadge } from "./TrendBadge";
 
-const AGE_GROUPS = [
-	"Neonate",
-	"Infant",
-	"Toddler",
-	"Preschooler",
-	"School Age",
-	"Adolescent"
-] as const;
-type AgeGroup = (typeof AGE_GROUPS)[number];
+// ─── Static chart config (hoisted, module-level) ────────────────────────────
 
-const AGE_GROUP_TONE: Record<AgeGroup, string> = {
-	Neonate: "bg-violet-500",
-	Infant: "bg-sky-500",
-	Toddler: "bg-teal-500",
-	Preschooler: "bg-emerald-500",
-	"School Age": "bg-amber-500",
-	Adolescent: "bg-rose-500"
+const X_SCALE_LINEAR: ChartPositionScaleOptions = {
+	scale: scaleLinear,
+	grid: true,
+	axis: {
+		line: false,
+		ticks: { size: 4, padding: 8 }
+	}
 };
 
-// ─── Normalizers ────────────────────────────────────────────────────────────
+const X_SCALE_POINT: ChartPositionScaleOptions = {
+	scale: scalePoint,
+	axis: {
+		line: false,
+		ticks: { size: 0, padding: 10 }
+	}
+};
 
-type AssessmentShape = {
-	diagnoses?: Array<{ name?: string; primary?: boolean }>;
-	primaryDiagnosis?: string;
-	secondaryDiagnoses?: string[];
-	summary?: string;
+const X_SCALE_BAND: ChartPositionScaleOptions = {
+	scale: scaleBand,
+	axis: {
+		line: false,
+		ticks: { size: 0, padding: 8 }
+	}
 };
 
 /**
- * Extract the primary diagnosis from an assessment JSON blob. Returns `null`
- * when nothing usable is present, so callers can exclude the encounter from
- * aggregate counts rather than lumping it into a fake "Unspecified" bucket.
+ * Continuous time x-scale for line/area charts. Positions the marks by the
+ * bucket timestamp so elapsed time drives spacing, and formats the axis
+ * ticks as short dates (adding the year only when the range spans years).
  */
-function pickPrimaryDiagnosis(assessment: unknown): string | null {
-	if (!assessment || typeof assessment !== "object") return null;
-	const a = assessment as AssessmentShape;
+function makeLinearXScale(
+	rows: ReadonlyArray<InsightSeriesPoint>
+): ChartPositionScaleOptions {
+	const times = rows.map(p => Number(p.ts)).filter(Number.isFinite);
+	if (times.length === 0) return X_SCALE_POINT;
 
-	if (typeof a.primaryDiagnosis === "string" && a.primaryDiagnosis.trim()) {
-		return a.primaryDiagnosis.trim();
-	}
+	const min = Math.min(...times);
+	const max = Math.max(...times);
+	const multiYear =
+		new Date(min).getUTCFullYear() !== new Date(max).getUTCFullYear();
 
-	const primary = a.diagnoses?.find(d => d.primary) ?? a.diagnoses?.[0];
-	const name = primary?.name?.trim();
-	return name ? name : null;
-}
-
-/**
- * Accepts either a bare array or `{ data: [...] }`. Used by list hooks whose
- * server-fn return shape varies across call sites.
- */
-function unwrapList<T>(value: unknown): T[] {
-	if (Array.isArray(value)) return value as T[];
-	if (value && typeof value === "object" && "data" in value) {
-		const inner = (value as { data?: unknown }).data;
-		if (Array.isArray(inner)) return inner as T[];
-	}
-	return [];
-}
-
-// ─── Main Component ─────────────────────────────────────────────────────────
-
-export default function ClinicAnalytics() {
-	// ── Data ────────────────────────────────────────────────────────────────
-	const patientsQuery = useAllPatients({ activeStatus: "Active", limit: 1000 });
-	const patients = useMemo(
-		() => patientsQuery.data?.data ?? [],
-		[patientsQuery.data]
-	);
-
-	const encountersQuery = useEncounterList({ limit: 10 });
-	const encounters = useMemo(
-		() => unwrapList<Encounter>(encountersQuery.data),
-		[encountersQuery.data]
-	);
-
-	const overdueQuery = useAllOverdueImmunizations();
-	const overdueImmunizations = useMemo(
-		() => unwrapList(overdueQuery.data),
-		[overdueQuery.data]
-	);
-
-	const labsQuery = useLabOrderList({ limit: 10 });
-	const labOrders = useMemo(
-		() => unwrapList<LabOrder>(labsQuery.data),
-		[labsQuery.data]
-	);
-
-	// ── Derived: age distribution ───────────────────────────────────────────
-	const ageGroups = useMemo(() => {
-		const counts = Object.fromEntries(AGE_GROUPS.map(g => [g, 0])) as Record<
-			AgeGroup,
-			number
-		>;
-
-		for (const p of patients) {
-			const info = calculatePediatricAge(p.dateOfBirth);
-			if ((AGE_GROUPS as readonly string[]).includes(info.ageGroup)) {
-				counts[info.ageGroup as AgeGroup] += 1;
+	return {
+		...X_SCALE_LINEAR,
+		axis: {
+			...X_SCALE_LINEAR.axis,
+			ticks: {
+				size: 4,
+				padding: 8,
+				format: value =>
+					new Date(Number(value)).toLocaleDateString("en-US", {
+						month: "short",
+						day: "numeric",
+						...(multiYear ? { year: "numeric" } : {})
+					})
 			}
 		}
-		return counts;
-	}, [patients]);
+	} satisfies ChartPositionScaleOptions;
+}
 
-	// ── Derived: top diagnoses ──────────────────────────────────────────────
-	const topDiagnoses = useMemo(() => {
-		const counts = new Map<string, number>();
-		for (const e of encounters) {
-			const dx = pickPrimaryDiagnosis(e.assessmentJson);
-			if (!dx) continue; // skip encounters with no usable diagnosis
-			counts.set(dx, (counts.get(dx) ?? 0) + 1);
+const Y_SCALE: ChartPositionScaleOptions = {
+	scale: scaleLinear,
+	grid: true,
+	axis: { line: false, ticks: false, tickLabels: false }
+};
+
+const CHART_THEME = {
+	foreground: "var(--muted-foreground)",
+	grid: "var(--border)",
+	background: "transparent"
+};
+
+const PAD = { top: 20, right: 24, bottom: 36, left: 44 };
+
+const DEFAULT_WIDTH = 700;
+
+// ─── Motion renderer (shared across charts) ─────────────────────────────────
+
+const CHART_RENDERER = motion({
+	initial: "always",
+	transition: { type: "spring", stiffness: 170, damping: 18, mass: 1 }
+});
+
+// ─── Metric config ──────────────────────────────────────────────────────────
+
+type InsightConfig = {
+	chartType: "line" | "area" | "bar";
+	color: string;
+	unit: string;
+	xLabel: string;
+	yLabel: string;
+};
+
+const INSIGHT_CONFIG: Record<string, InsightConfig> = {
+	visits: {
+		chartType: "area",
+		color: "#0d9488",
+		unit: "visits",
+		xLabel: "Week",
+		yLabel: "Visits"
+	},
+	newPatients: {
+		chartType: "bar",
+		color: "#6366f1",
+		unit: "patients",
+		xLabel: "Month",
+		yLabel: "New patients"
+	},
+	immunizations: {
+		chartType: "bar",
+		color: "#0ea5e9",
+		unit: "doses",
+		xLabel: "Week",
+		yLabel: "Doses administered"
+	},
+	revenue: {
+		chartType: "line",
+		color: "#059669",
+		unit: "USD",
+		xLabel: "Week",
+		yLabel: "Revenue"
+	}
+};
+
+function getInsightConfig(id: string): InsightConfig {
+	return (
+		INSIGHT_CONFIG[id] ?? {
+			chartType: "line",
+			color: "var(--primary)",
+			unit: "",
+			xLabel: "Period",
+			yLabel: "Value"
 		}
-		return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
-	}, [encounters]);
-
-	// ── Derived: visit-type mix ─────────────────────────────────────────────
-	const visitTypes = useMemo(() => {
-		const counts = new Map<string, number>();
-		for (const e of encounters) {
-			const key = e.visitType || "Other";
-			counts.set(key, (counts.get(key) ?? 0) + 1);
-		}
-		return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
-	}, [encounters]);
-
-	// ── Derived: counters ───────────────────────────────────────────────────
-	const pendingLabOrders = useMemo(
-		() =>
-			labOrders.filter(
-				l => l.status !== "Completed" && l.status !== "Cancelled"
-			).length,
-		[labOrders]
 	);
+}
 
-	const isLoading =
-		patientsQuery.isLoading ||
-		encountersQuery.isLoading ||
-		overdueQuery.isLoading ||
-		labsQuery.isLoading;
+function formatInsightValue(
+	insight: ClinicInsight,
+	config: InsightConfig
+): string {
+	if (config.unit === "USD") {
+		return new Intl.NumberFormat("en-US", {
+			style: "currency",
+			currency: "USD",
+			maximumFractionDigits: 0
+		}).format(insight.value);
+	}
+	return formatCount(insight.value);
+}
 
-	const hasError =
-		patientsQuery.isError ||
-		encountersQuery.isError ||
-		overdueQuery.isError ||
-		labsQuery.isError;
+// ─── Main component ─────────────────────────────────────────────────────────
 
-	if (hasError) {
+export type ClinicAnalyticsProps = {
+	className?: string;
+};
+
+export default function ClinicAnalytics({ className }: ClinicAnalyticsProps) {
+	const { data, isLoading, isError, error, refetch } = useClinicInsights();
+
+	if (isLoading) {
+		return <ClinicAnalyticsSkeleton className={className} />;
+	}
+
+	if (isError || !data) {
 		return (
-			<div className='rounded-2xl border border-rose-200 bg-rose-50 p-8 text-center'>
-				<AlertCircle className='mx-auto mb-3 size-10 text-rose-500' />
-				<p className='font-bold text-rose-700 text-sm'>
-					Could not load analytics
-				</p>
-				<p className='mt-1 text-rose-600 text-xs'>
-					One or more data sources failed. Try refreshing the page.
-				</p>
-			</div>
+			<ClinicAnalyticsError
+				className={className}
+				message={error?.message ?? "Failed to load clinic insights."}
+				onRetry={() => void refetch()}
+			/>
 		);
 	}
 
 	return (
-		<div className='space-y-6 pb-12'>
-			{/* Header */}
+		<div className={cn("space-y-6", className)}>
 			<header>
-				<div className='flex items-center space-x-2'>
-					<h1 className='font-bold text-2xl text-slate-800'>
-						Clinic Analytics
-					</h1>
-					<span className='rounded-full bg-teal-100 px-2.5 py-0.5 font-bold text-teal-800 text-xs'>
-						Live
-					</span>
-				</div>
-				<p className='mt-0.5 text-slate-500 text-xs'>
-					Snapshot of your active patient cohort, visit mix, and pending work.
+				<h1 className='font-bold text-2xl tracking-tight'>Clinic Analytics</h1>
+				<p className='mt-0.5 text-muted-foreground text-sm'>
+					Practice-level metrics across patients, visits, immunizations, and
+					revenue.
 				</p>
 			</header>
 
-			{/* Highlights */}
-			<section className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4'>
-				<StatCard
-					accent='bg-teal-500'
-					label='Active Patients'
-					sub='Currently enrolled and active'
-					tone='text-teal-600'
-					value={isLoading ? null : patients.length}
-				/>
-				<StatCard
-					accent='bg-rose-500'
-					label='Overdue Vaccines'
-					sub={
-						overdueImmunizations.length > 0
-							? "Requires outreach"
-							: "All up to date"
-					}
-					tone={
-						overdueImmunizations.length > 0
-							? "text-rose-600"
-							: "text-emerald-600"
-					}
-					value={isLoading ? null : overdueImmunizations.length}
-				/>
-				<StatCard
-					accent='bg-blue-500'
-					label='Recent Encounters'
-					sub='Documented visits on file'
-					tone='text-blue-600'
-					value={isLoading ? null : encounters.length}
-				/>
-				<StatCard
-					accent='bg-purple-500'
-					label='Pending Labs'
-					sub='Awaiting results or review'
-					tone='text-purple-600'
-					value={isLoading ? null : pendingLabOrders}
-				/>
-			</section>
-
-			{/* Charts row */}
-			<section className='grid grid-cols-1 gap-6 lg:grid-cols-2'>
-				{/* Age demographics */}
-				<Panel
-					empty={
-						patients.length === 0 ? "No active patients to chart yet." : null
-					}
-					icon={<Users className='size-4 text-teal-600' />}
-					title='Age Distribution'
-				>
-					<div className='space-y-3'>
-						{AGE_GROUPS.map(group => {
-							const count = ageGroups[group];
-							const pct =
-								patients.length > 0
-									? Math.round((count / patients.length) * 100)
-									: 0;
-							return (
-								<div
-									className='space-y-1'
-									key={group}
-								>
-									<div className='flex items-center justify-between text-xs'>
-										<span className='font-semibold text-slate-700'>
-											{group}
-										</span>
-										<span className='font-bold text-slate-900'>
-											{count} ({pct}%)
-										</span>
-									</div>
-									<div className='h-2.5 w-full overflow-hidden rounded-full bg-slate-100'>
-										<div
-											className={`h-full rounded-full transition-all duration-500 ${AGE_GROUP_TONE[group]}`}
-											style={{
-												width: `${count === 0 ? 0 : Math.max(pct, 4)}%`
-											}}
-										/>
-									</div>
-								</div>
-							);
-						})}
-					</div>
-				</Panel>
-
-				{/* Top diagnoses */}
-				<Panel
-					empty={
-						topDiagnoses.length === 0
-							? "No encounter diagnoses recorded yet."
-							: null
-					}
-					icon={<Stethoscope className='size-4 text-blue-600' />}
-					title='Top Diagnoses'
-				>
-					<ol className='space-y-3'>
-						{topDiagnoses.map(([dx, count], idx) => (
-							<li
-								className='flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 p-3 text-xs'
-								key={dx}
-							>
-								<div className='flex min-w-0 items-center gap-2.5'>
-									<span className='flex size-5 shrink-0 items-center justify-center rounded-full bg-teal-100 font-bold text-[10px] text-teal-800'>
-										{idx + 1}
-									</span>
-									<span className='truncate font-semibold text-slate-800'>
-										{dx}
-									</span>
-								</div>
-								<span className='shrink-0 rounded-md border border-slate-200 bg-white px-2.5 py-0.5 font-bold text-slate-800'>
-									{count} {count === 1 ? "visit" : "visits"}
-								</span>
-							</li>
-						))}
-					</ol>
-				</Panel>
-			</section>
-
-			{/* Visit-type mix */}
-			{visitTypes.length > 0 ? (
-				<Panel
-					icon={<FlaskConical className='size-4 text-purple-600' />}
-					title='Visit Type Mix'
-				>
-					<div className='flex flex-wrap gap-2'>
-						{visitTypes.map(([type, count]) => (
-							<span
-								className='rounded-full border border-slate-200 bg-white px-3 py-1 font-semibold text-slate-700 text-xs'
-								key={type}
-							>
-								{type}
-								<span className='ml-2 text-slate-400'>{count}</span>
-							</span>
-						))}
-					</div>
-				</Panel>
-			) : null}
-		</div>
-	);
-}
-
-// ─── Sub-components ─────────────────────────────────────────────────────────
-
-function StatCard({
-	label,
-	value,
-	sub,
-	accent,
-	tone
-}: {
-	label: string;
-	value: number | null;
-	sub: string;
-	accent: string;
-	tone: string;
-}) {
-	return (
-		<div className='relative overflow-hidden rounded-2xl border border-slate-200 bg-white p-5 shadow-2xs'>
-			<span
-				aria-hidden='true'
-				className={`absolute inset-y-0 left-0 w-1 ${accent}`}
-			/>
-			<span className='font-bold text-slate-500 text-xs uppercase tracking-wider'>
-				{label}
-			</span>
-			<div className='mt-2 font-extrabold text-3xl text-slate-800'>
-				{value === null ? (
-					<span className='inline-block h-8 w-12 animate-pulse rounded bg-slate-200' />
-				) : (
-					value
-				)}
+			{/* Top-line insight cards */}
+			<div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-4'>
+				{data.insights.map(insight => (
+					<InsightCard
+						insight={insight}
+						key={insight.id}
+					/>
+				))}
 			</div>
-			<p className={`mt-1 font-medium text-xs ${tone}`}>{sub}</p>
+
+			{/* Detailed charts */}
+			<div className='grid gap-6 lg:grid-cols-2'>
+				{data.insights.map(insight => (
+					<InsightChartCard
+						insight={insight}
+						key={`chart-${insight.id}`}
+					/>
+				))}
+			</div>
 		</div>
 	);
 }
 
-function Panel({
-	title,
-	icon,
-	empty,
-	children
+// ─── Insight summary card ───────────────────────────────────────────────────
+
+const InsightCard = React.memo(function InsightCard({
+	insight
 }: {
-	title: string;
-	icon?: React.ReactNode;
-	empty?: string | null;
-	children: React.ReactNode;
+	insight: ClinicInsight;
+}) {
+	const config = getInsightConfig(insight.id);
+	const isCurrency = config.unit === "USD";
+	return (
+		<Card>
+			<CardContent className='pt-6'>
+				<div className='flex items-center justify-between'>
+					<div>
+						<p className='font-bold text-muted-foreground text-sm'>
+							{insight.label}
+						</p>
+						<p className='mt-1 font-extrabold text-3xl tabular-nums tracking-tight'>
+							{formatInsightValue(insight, config)}
+						</p>
+						{!isCurrency && (
+							<p className='mt-0.5 font-medium text-muted-foreground text-xs'>
+								{insight.unit ?? config.unit}
+							</p>
+						)}
+					</div>
+					{insight.trend && (
+						<TrendBadge
+							direction={insight.trend.direction}
+							value={insight.trend.value}
+						/>
+					)}
+				</div>
+			</CardContent>
+		</Card>
+	);
+});
+
+// ─── Detailed chart card ────────────────────────────────────────────────────
+
+const InsightChartCard = React.memo(function InsightChartCard({
+	insight
+}: {
+	insight: ClinicInsight;
+}) {
+	const config = getInsightConfig(insight.id);
+
+	const definition = React.useMemo(() => {
+		const rows = insight.series.map(p => ({ ...p }));
+		if (rows.length === 0) return null;
+
+		const usesTimeX =
+			(config.chartType === "line" || config.chartType === "area") &&
+			rows.some(p => p.ts != null);
+		const xScale = usesTimeX
+			? makeLinearXScale(rows)
+			: config.chartType === "bar"
+				? X_SCALE_BAND
+				: X_SCALE_POINT;
+		const xAccessor = config.chartType === "bar" || !usesTimeX ? "label" : "ts";
+
+		const marks =
+			config.chartType === "bar"
+				? [
+						barY(rows, {
+							id: `bar-${insight.id}`,
+							x: xAccessor,
+							y: "value",
+							fill: config.color,
+							radius: 4
+						})
+					]
+				: config.chartType === "area"
+					? [
+							areaY(rows, {
+								id: `area-${insight.id}`,
+								x: xAccessor,
+								y: "value",
+								fill: config.color,
+								stroke: config.color,
+								strokeWidth: 2,
+								curve: d3Curve(curveNatural)
+							})
+						]
+					: [
+							lineY(rows, {
+								id: `line-${insight.id}`,
+								x: xAccessor,
+								y: "value",
+								stroke: config.color,
+								strokeWidth: 2.5,
+								curve: d3Curve(curveMonotoneX)
+							})
+						];
+
+		return defineChart({
+			marks,
+			scales: {
+				x: xScale,
+				y: Y_SCALE
+			},
+			margin: PAD,
+			theme: CHART_THEME,
+			svgAnimation: false,
+			focus: "group-x",
+			tooltip: {
+				use: tooltip,
+				className: "sc-chart-tooltip",
+				anchor: "group-center",
+				placement: "auto"
+			}
+		});
+	}, [insight.id, insight.series, config.chartType, config.color]);
+
+	return (
+		<Card>
+			<CardHeader>
+				<CardTitle className='text-base'>{insight.label}</CardTitle>
+				<p className='text-muted-foreground text-xs'>
+					{config.yLabel} by {config.xLabel.toLowerCase()}
+				</p>
+			</CardHeader>
+			<CardContent>
+				{definition ? (
+					<div style={{ height: 260 }}>
+						<RendererChart
+							ariaLabel={`${insight.label} chart`}
+							definition={definition}
+							height={260}
+							initialWidth={DEFAULT_WIDTH}
+							renderer={CHART_RENDERER}
+						/>
+					</div>
+				) : (
+					<EmptyChartState />
+				)}
+			</CardContent>
+		</Card>
+	);
+});
+
+// ─── Empty / loading / error states ─────────────────────────────────────────
+
+function EmptyChartState() {
+	return (
+		<div className='flex h-64 items-center justify-center rounded-xl border border-dashed bg-muted/40 text-center'>
+			<div>
+				<p className='font-medium text-muted-foreground text-sm'>No data yet</p>
+				<p className='mt-1 text-muted-foreground/70 text-xs'>
+					Insights will appear once the clinic records activity.
+				</p>
+			</div>
+		</div>
+	);
+}
+
+function ClinicAnalyticsSkeleton({ className }: { className?: string }) {
+	return (
+		<div className={cn("space-y-6", className)}>
+			<div className='space-y-2'>
+				<Skeleton className='h-8 w-64' />
+				<Skeleton className='h-4 w-96' />
+			</div>
+			<div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-4'>
+				{[0, 1, 2, 3].map(i => (
+					<Skeleton
+						className='h-28'
+						key={i}
+					/>
+				))}
+			</div>
+			<div className='grid gap-6 lg:grid-cols-2'>
+				<Skeleton className='h-80' />
+				<Skeleton className='h-80' />
+				<Skeleton className='h-80' />
+				<Skeleton className='h-80' />
+			</div>
+		</div>
+	);
+}
+
+function ClinicAnalyticsError({
+	message,
+	onRetry,
+	className
+}: {
+	message: string;
+	onRetry: () => void;
+	className?: string;
 }) {
 	return (
-		<div className='space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-2xs'>
-			<h3 className='flex items-center font-bold text-base text-slate-800'>
-				{icon ? <span className='mr-2'>{icon}</span> : null}
-				{title}
-			</h3>
-			{empty ? (
-				<p className='rounded-xl bg-slate-50 p-4 text-center text-slate-500 text-xs'>
-					{empty}
-				</p>
-			) : (
-				children
-			)}
-		</div>
+		<Card className={className}>
+			<CardContent className='flex flex-col items-center justify-center gap-3 py-12 text-center'>
+				<p className='font-medium'>Couldn't load analytics</p>
+				<p className='mt-0.5 text-muted-foreground text-sm'>{message}</p>
+				<button
+					className='mt-2 rounded-md border px-3 py-1.5 text-sm'
+					onClick={onRetry}
+					type='button'
+				>
+					Try again
+				</button>
+			</CardContent>
+		</Card>
 	);
 }

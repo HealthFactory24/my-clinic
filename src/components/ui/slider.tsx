@@ -1,28 +1,58 @@
 "use client";
 
-import * as SliderPrimitive from "@radix-ui/react-slider";
+import { cn } from "cn";
+import { Slider as SliderPrimitive } from "radix-ui";
 import * as React from "react";
 
-import { cn } from "@/lib/utils";
+function Slider({
+	className,
+	defaultValue,
+	value,
+	min = 0,
+	max = 100,
+	...props
+}: React.ComponentProps<typeof SliderPrimitive.Root>) {
+	const _values = React.useMemo(
+		() =>
+			Array.isArray(value)
+				? value
+				: Array.isArray(defaultValue)
+					? defaultValue
+					: [min, max],
+		[value, defaultValue, min, max]
+	);
 
-const Slider = React.forwardRef<
-	React.ElementRef<typeof SliderPrimitive.Root>,
-	React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root>
->(({ className, ...props }, ref) => (
-	<SliderPrimitive.Root
-		className={cn(
-			"relative flex w-full touch-none select-none items-center",
-			className
-		)}
-		ref={ref}
-		{...props}
-	>
-		<SliderPrimitive.Track className='relative h-2 w-full grow overflow-hidden rounded-full bg-secondary'>
-			<SliderPrimitive.Range className='absolute h-full bg-primary' />
-		</SliderPrimitive.Track>
-		<SliderPrimitive.Thumb className='block h-5 w-5 rounded-full border-2 border-primary bg-background ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50' />
-	</SliderPrimitive.Root>
-));
-Slider.displayName = SliderPrimitive.Root.displayName;
+	return (
+		<SliderPrimitive.Root
+			className={cn(
+				"relative flex w-full touch-none select-none items-center data-vertical:h-full data-vertical:min-h-40 data-vertical:w-auto data-vertical:flex-col data-disabled:opacity-50",
+				className
+			)}
+			data-slot='slider'
+			defaultValue={defaultValue}
+			max={max}
+			min={min}
+			value={value}
+			{...props}
+		>
+			<SliderPrimitive.Track
+				className='relative grow overflow-hidden rounded-4xl bg-muted data-horizontal:h-3 data-vertical:h-full data-horizontal:w-full data-vertical:w-3'
+				data-slot='slider-track'
+			>
+				<SliderPrimitive.Range
+					className='absolute select-none bg-primary data-horizontal:h-full data-vertical:w-full'
+					data-slot='slider-range'
+				/>
+			</SliderPrimitive.Track>
+			{Array.from({ length: _values.length }, (_, index) => (
+				<SliderPrimitive.Thumb
+					className='block size-4 shrink-0 select-none rounded-4xl border border-primary bg-white shadow-sm ring-ring/50 transition-colors hover:ring-4 focus-visible:outline-hidden focus-visible:ring-4 disabled:pointer-events-none disabled:opacity-50'
+					data-slot='slider-thumb'
+					key={index}
+				/>
+			))}
+		</SliderPrimitive.Root>
+	);
+}
 
 export { Slider };

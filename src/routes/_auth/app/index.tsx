@@ -156,8 +156,8 @@ function DashboardPage() {
 									<li key={apt.id}>
 										<Link
 											className='flex items-center gap-4 rounded-xl border border-border p-3 transition-colors hover:bg-muted/50'
-											params={{ appointmentId: apt.id }}
-											to='/app/appointments/$appointmentId'
+											params={{ id: apt.id }}
+											to='/app/appointments/$id'
 										>
 											<time
 												className='flex size-12 shrink-0 flex-col items-center justify-center rounded-full bg-primary/10 font-bold text-primary text-xs'

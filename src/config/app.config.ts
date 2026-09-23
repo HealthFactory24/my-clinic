@@ -1,6 +1,6 @@
 // src/config/app.config.ts
 
-import { ENV } from "varlock/env";
+import { env } from "../env/server";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Build metadata
@@ -322,7 +322,7 @@ const rawConfig = {
 	},
 
 	vector: {
-		embeddingDimension: ENV.EMBEDDING_DIMENSION,
+		embeddingDimension: env.EMBEDDING_DIMENSION,
 		similarityThreshold: 0.7,
 		defaultLimit: 10,
 		indexType: "hnsw" as const

@@ -1,5 +1,6 @@
 // src/components/growth/growth-utils.ts
-import type { BadgeProps } from "#/components/ui/badge.tsx";
+
+import type { BadgeProps } from "../components/ui/badge";
 
 export type AgeGroup =
 	| "Newborn"

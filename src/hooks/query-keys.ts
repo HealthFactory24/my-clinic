@@ -223,6 +223,11 @@ export const queryKeys = {
 		count: (p?: PatientCountParams) =>
 			["patients", "count", stableParams({ p })] as const
 	},
+	analytics: {
+		all: ["analytics"] as const,
+		insights: (params: Record<string, unknown>) =>
+			["analytics", "insights", params] as const
+	},
 
 	appointments: {
 		all: ["appointments"] as const,

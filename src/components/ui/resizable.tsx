@@ -1,20 +1,12 @@
 "use client";
 
+import { cn } from "cn";
 import * as ResizablePrimitive from "react-resizable-panels";
-
-import { cn } from "@/lib/utils";
-
-interface ResizableLayoutProps {
-	direction?: "horizontal" | "vertical";
-	children: React.ReactNode;
-	className?: string;
-}
 
 function ResizablePanelGroup({
 	className,
-	direction,
 	...props
-}: ResizablePrimitive.GroupProps & { direction?: "horizontal" | "vertical" }) {
+}: ResizablePrimitive.GroupProps) {
 	return (
 		<ResizablePrimitive.Group
 			className={cn(
@@ -22,24 +14,8 @@ function ResizablePanelGroup({
 				className
 			)}
 			data-slot='resizable-panel-group'
-			orientation={direction}
 			{...props}
 		/>
-	);
-}
-
-export function ResizableLayout({
-	direction = "horizontal",
-	children,
-	className
-}: ResizableLayoutProps) {
-	return (
-		<ResizablePanelGroup
-			className={cn("flex flex-1 overflow-hidden", className)}
-			direction={direction}
-		>
-			{children}
-		</ResizablePanelGroup>
 	);
 }
 

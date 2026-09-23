@@ -79,8 +79,8 @@ function EditPrescriptionPage() {
 								variant='outline'
 							>
 								<Link
-									params={{ id }}
-									to='/app/prescriptions/$id'
+									params={{ patientId: prescription.patientId }}
+									to='/app/patients/$patientId'
 								>
 									View Prescription
 								</Link>

@@ -1,5 +1,8 @@
+// src/routes/_auth/app/analytics/index.tsx
 import { createFileRoute } from "@tanstack/react-router";
-import { lazy } from "react";
+import { lazy, Suspense } from "react";
+
+import { ClinicAnalyticsSkeleton } from "@/components/skeletons";
 
 const ClinicAnalytics = lazy(() =>
 	import("@/components/analytics/ClinicAnalytics").then(m => ({
@@ -8,9 +11,14 @@ const ClinicAnalytics = lazy(() =>
 );
 
 export const Route = createFileRoute("/_auth/app/analytics/")({
-	component: AnalyticsPage
+	component: AnalyticsPage,
+	pendingComponent: ClinicAnalyticsSkeleton
 });
 
 function AnalyticsPage() {
-	return <ClinicAnalytics />;
+	return (
+		<Suspense fallback={<ClinicAnalyticsSkeleton />}>
+			<ClinicAnalytics />
+		</Suspense>
+	);
 }

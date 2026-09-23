@@ -369,10 +369,7 @@ function MainLayout({ panelConfig }: { panelConfig: PanelConfig }) {
 			{panelConfig.navBar}
 			{/* Desktop Layout */}
 			<div className='hidden flex-1 overflow-hidden md:flex'>
-				<ResizablePanelGroup
-					className='flex flex-1 overflow-hidden'
-					direction='horizontal'
-				>
+				<ResizablePanelGroup className='flex flex-1 overflow-hidden'>
 					{mainPanels.map((panel, index) => (
 						<React.Fragment key={panel.title}>
 							{index > 0 && <ResizableHandle withHandle />}

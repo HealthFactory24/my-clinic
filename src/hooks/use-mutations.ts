@@ -230,6 +230,9 @@ export function useRegister() {
 }
 
 export function useLogout() {
+	useMutation({
+		mutationFn: () => $logout()
+	});
 	return useServerMutation($logout, {
 		successMessage: "Signed out.",
 		invalidateKeys: [queryKeys.auth.all]

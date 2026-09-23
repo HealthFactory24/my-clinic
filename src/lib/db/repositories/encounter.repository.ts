@@ -3,13 +3,12 @@ import { eq, gte, ilike, lte, or, type SQL, sql } from "drizzle-orm";
 import type { PgColumn } from "drizzle-orm/pg-core";
 
 import {
-	combineConditions,
 	type DB,
 	type DBorTx,
 	db,
-	readCount,
 	type Transaction,
-	withTransaction
+	withTransaction,
+	combineConditions
 } from "#/lib/db";
 import { escapeRegExp, queryCache } from "#/lib/db/cache";
 import {
@@ -34,6 +33,7 @@ import {
 	vitals as vitalTable
 } from "#/lib/db/schema";
 
+import { readCount } from "../../../utils";
 import { BaseRepository, type ClinicScope } from "./base.repository";
 
 // ============================================================
@@ -592,7 +592,7 @@ export class EncounterRepository extends BaseRepository {
 			: combineConditions(buildEncounterConditions(options));
 
 		const result = await this.db
-			.select({ count: sql`count(*)` })
+			.select({ count: sql<number>`count(*)` })
 			.from(encounters)
 			.where(condition);
 

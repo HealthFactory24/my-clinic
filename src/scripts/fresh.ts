@@ -402,6 +402,8 @@ const VERIFY_TABLES = [
 	["lab_orders", "lab_orders"],
 	["vitals", "vitals"],
 	["growth_measurements", "growth_measurements"],
+	["medical_records", "medical_records"],
+	["payments", "payments"],
 	["who_growth_data", "who_growth_data"]
 ] as const;
 

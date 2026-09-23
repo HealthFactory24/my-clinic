@@ -1,15 +1,53 @@
 // packages/db/src/repositories/dashboard.repository.ts
-import { and, desc, eq, gte, lt, type SQL, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lt, type SQL, sql } from "drizzle-orm";
 
 import { db } from "#/lib/db";
 import { queryCache } from "#/lib/db/cache";
 import {
 	appointments as appointmentTable,
+	immunizations,
 	patients as patientTable,
+	payments as paymentTable,
 	immunizations as vaccinationTable,
 	encounters as visitTable
 } from "#/lib/db/schema";
 import type { DashboardStats } from "#/types/functions.ts";
+
+// ============================================================
+// Types
+// ============================================================
+export type Scope = {
+	providerId?: string;
+	clinicId?: string;
+};
+
+/**
+ * Scope can be passed as:
+ *   - a bare `clinicId` string  → `{ clinicId }`
+ *   - a full `Scope` object     → used as-is
+ *   - nothing                   → `{}`
+ *
+ * This exists because `$getClinicInsights` calls
+ * `dashboardRepository.getVisitsSeries(clinicId, data)`
+ * with a string, while internal helpers expect a `Scope`.
+ */
+type ScopeInput = string | Scope | undefined;
+
+export type SeriesRange = {
+	from?: Date | string;
+	to?: Date | string;
+	/** Number of buckets to look back when `from` is omitted. */
+	weeks?: number;
+};
+
+export type DateTrunc = "day" | "week" | "month" | "quarter" | "year";
+
+export type InsightSeriesPoint = {
+	label: string;
+	value: number;
+	/** Bucket start time (epoch ms); lets clients use a continuous time x-axis. */
+	ts?: number;
+};
 
 // ============================================================
 // Constants & helpers
@@ -17,12 +55,16 @@ import type { DashboardStats } from "#/types/functions.ts";
 
 const CACHE_TTL_MS = 30_000;
 const LIST_CACHE_TTL_MS = 15_000;
+const DEFAULT_WEEKS = 12;
 
-type Scope = { providerId?: string; clinicId?: string };
+function resolveScope(input: ScopeInput): Scope {
+	if (!input) return {};
+	if (typeof input === "string") return { clinicId: input };
+	return input;
+}
 
 /**
- * Build a scope filter for the `patients` table (used when the joined
- * entity does not carry clinic/provider columns directly).
+ * Build a scope filter for the `patients` table.
  */
 function patientScope(scope: Scope): SQL | undefined {
 	const parts: SQL[] = [];
@@ -33,8 +75,7 @@ function patientScope(scope: Scope): SQL | undefined {
 }
 
 /**
- * `[start, end)` for a UTC calendar day. Single source of truth so
- * `getTodayAppointmentsCount` and `getAppointmentsByDate` cannot drift.
+ * `[start, end)` for a UTC calendar day.
  */
 function utcDayRange(date: Date = new Date()): { start: Date; end: Date } {
 	const start = new Date(
@@ -46,13 +87,12 @@ function utcDayRange(date: Date = new Date()): { start: Date; end: Date } {
 }
 
 /**
- * `[start, end)` for the ISO week (Monday → next Monday) containing `date`,
- * in UTC. Matches the convention used in `appointment.repository.ts`.
+ * `[start, end)` for the ISO week (Monday → next Monday) in UTC.
  */
 function utcIsoWeekRange(date: Date = new Date()): { start: Date; end: Date } {
 	const { start: dayStart } = utcDayRange(date);
-	const day = dayStart.getUTCDay(); // 0 = Sun
-	const diff = (day + 6) % 7; // Mon → 0, Sun → 6
+	const day = dayStart.getUTCDay();
+	const diff = (day + 6) % 7;
 	const start = new Date(dayStart);
 	start.setUTCDate(start.getUTCDate() - diff);
 	const end = new Date(start);
@@ -61,8 +101,7 @@ function utcIsoWeekRange(date: Date = new Date()): { start: Date; end: Date } {
 }
 
 /**
- * `dueDate` is stored as an ISO text column. Cast to `date` and compare
- * against a UTC `date`, never a JS `Date`, so timezone drift is impossible.
+ * `dueDate` is stored as ISO text. Cast to `date` for comparisons.
  */
 function dueDateAsDate(): SQL {
 	return sql`(${vaccinationTable.dueDate})::date`;
@@ -90,6 +129,165 @@ async function cached<T>(
 }
 
 // ============================================================
+// Series helpers
+// ============================================================
+
+/**
+ * Resolve `{ from, to }` for a series query.
+ *
+ * - If `from` is provided, use it.
+ * - Otherwise go back `weeks` (default 12) from `to` (default now).
+ * - `end` is inclusive-ish: we add one bucket so the current period is
+ *   captured.
+ */
+function resolveSeriesRange(
+	range: SeriesRange,
+	defaultWeeks = DEFAULT_WEEKS
+): { start: Date; end: Date } {
+	const end = range.to ? new Date(range.to) : new Date();
+
+	const start = range.from
+		? new Date(range.from)
+		: (() => {
+				const d = new Date(end);
+				d.setUTCDate(d.getUTCDate() - (range.weeks ?? defaultWeeks) * 7);
+				return d;
+			})();
+
+	return { start, end };
+}
+
+/**
+ * Postgres `date_trunc` returns a `string` when read through `db.execute`,
+ * but a `Date` when read through Drizzle's typed `.select()`. Normalize both.
+ */
+function coerceBucket(bucket: unknown): Date {
+	if (bucket instanceof Date) return bucket;
+	if (typeof bucket === "string") return new Date(bucket);
+	if (typeof bucket === "number") return new Date(bucket);
+	return new Date(0);
+}
+
+/**
+ * Fill gaps in a time series so the chart has a continuous x-axis.
+ *
+ * Input rows come from `GROUP BY date_trunc(...)`. Because the DB only
+ * returns buckets that have rows, a chart of "visits per week" would
+ * otherwise skip weeks with zero visits and compress the axis.
+ */
+function densifySeries(
+	rows: ReadonlyArray<{ bucket: unknown; value: number | string }>,
+	start: Date,
+	end: Date,
+	granularity: DateTrunc
+): Array<InsightSeriesPoint> {
+	const byKey = new Map<string, number>();
+	for (const row of rows) {
+		const d = coerceBucket(row.bucket);
+		byKey.set(bucketKey(d, granularity), Number(row.value) || 0);
+	}
+
+	const out: Array<InsightSeriesPoint> = [];
+	const cursor = truncDate(start, granularity);
+	const last = truncDate(end, granularity);
+
+	// Safety: cap iterations so a bad range can't hang the request.
+	let guard = 0;
+	while (cursor <= last && guard < 500) {
+		out.push({
+			label: formatBucketLabel(cursor, granularity),
+			value: byKey.get(bucketKey(cursor, granularity)) ?? 0,
+			ts: cursor.getTime()
+		});
+		advance(cursor, granularity);
+		guard += 1;
+	}
+
+	return out;
+}
+
+function truncDate(d: Date, granularity: DateTrunc): Date {
+	const out = new Date(
+		Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+	);
+	switch (granularity) {
+		case "day":
+			break;
+		case "week": {
+			const day = out.getUTCDay();
+			const diff = (day + 6) % 7; // Mon = 0
+			out.setUTCDate(out.getUTCDate() - diff);
+			break;
+		}
+		case "month":
+			out.setUTCDate(1);
+			break;
+		case "quarter":
+			out.setUTCDate(1);
+			out.setUTCMonth(Math.floor(out.getUTCMonth() / 3) * 3);
+			break;
+		case "year":
+			out.setUTCDate(1);
+			out.setUTCMonth(0);
+			break;
+	}
+	return out;
+}
+
+function advance(d: Date, granularity: DateTrunc): void {
+	switch (granularity) {
+		case "day":
+			d.setUTCDate(d.getUTCDate() + 1);
+			break;
+		case "week":
+			d.setUTCDate(d.getUTCDate() + 7);
+			break;
+		case "month":
+			d.setUTCMonth(d.getUTCMonth() + 1);
+			break;
+		case "quarter":
+			d.setUTCMonth(d.getUTCMonth() + 3);
+			break;
+		case "year":
+			d.setUTCFullYear(d.getUTCFullYear() + 1);
+			break;
+	}
+}
+
+function bucketKey(d: Date, granularity: DateTrunc): string {
+	return `${granularity}:${d.toISOString().slice(0, 10)}`;
+}
+
+function formatBucketLabel(d: Date, granularity: DateTrunc): string {
+	switch (granularity) {
+		case "day":
+			return d.toLocaleDateString("en-US", {
+				month: "short",
+				day: "numeric",
+				timeZone: "UTC"
+			});
+		case "week":
+			return d.toLocaleDateString("en-US", {
+				month: "short",
+				day: "numeric",
+				timeZone: "UTC"
+			});
+		case "month":
+			return d.toLocaleDateString("en-US", {
+				month: "short",
+				year: "2-digit",
+				timeZone: "UTC"
+			});
+		case "quarter":
+			return `Q${Math.floor(d.getUTCMonth() / 3) + 1} ${String(
+				d.getUTCFullYear()
+			).slice(2)}`;
+		case "year":
+			return String(d.getUTCFullYear());
+	}
+}
+
+// ============================================================
 // Consolidated stats aggregate
 // ============================================================
 
@@ -104,18 +302,6 @@ type StatsRow = {
 	upcomingVaccinations: number;
 };
 
-/**
- * The seven dashboard count methods all feed `$getStats`, which fires them in
- * parallel. Each used to run its own `COUNT(*)` under its own cache key, so a
- * cold dashboard render cost ~7 round-trips with independent cache misses.
- * This issues ONE query with `COUNT(*) FILTER` scalar subselects (same
- * clinic/provider scoping), so a cold render is one round-trip and the counts
- * are internally consistent.
- *
- * Note: the `postgres` client is configured with `transform: postgres.camel`,
- * so raw `db.execute` rows come back with camelCase keys — the snake_case
- * aliases below are read as `totalPatients` etc.
- */
 async function getAggregateStats(scope: Scope = {}): Promise<DashboardStats> {
 	const key = `dashboard:stats:${scope.clinicId ?? "all"}:${scope.providerId ?? "all"}`;
 	return cached(
@@ -137,9 +323,6 @@ async function getAggregateStats(scope: Scope = {}): Promise<DashboardStats> {
 			const sevenDaysOut = new Date(todayStart);
 			sevenDaysOut.setUTCDate(sevenDaysOut.getUTCDate() + 7);
 
-			// Base scope conditions, shared by every subselect that touches the
-			// given table. Falls back to `true` when scope is empty so the WHERE
-			// clause is never dropped.
 			const apptScope = and(
 				patientScope(scope),
 				scope.providerId
@@ -230,9 +413,8 @@ async function getAggregateStats(scope: Scope = {}): Promise<DashboardStats> {
 }
 
 /**
- * `$getStats` calls the seven count methods in parallel, so guard against a
- * stampede where all seven miss the cold cache and each re-issues the query.
- * The first caller wins; the rest await the same in-flight promise.
+ * Stampede guard: `$getStats` fires seven count methods in parallel.
+ * Without this, all seven miss the cold cache and each re-issues the query.
  */
 const statsInFlight = new Map<string, Promise<DashboardStats>>();
 
@@ -254,38 +436,260 @@ async function loadAggregateStats(scope: Scope = {}): Promise<DashboardStats> {
 
 export const dashboardRepository = {
 	// ------------------------------------------------------------------
+	// Series (used by `$getClinicInsights`)
+	// ------------------------------------------------------------------
+
+	/**
+	 * Visits per ISO week.
+	 *
+	 * Callable as:
+	 *   getVisitsSeries("clinic_123")
+	 *   getVisitsSeries({ clinicId: "clinic_123", providerId: "staff_1" })
+	 *   getVisitsSeries(scope, { weeks: 24 })
+	 */
+	async getVisitsSeries(
+		scopeInput: ScopeInput = {},
+		range: SeriesRange = {}
+	): Promise<Array<InsightSeriesPoint>> {
+		const scope = resolveScope(scopeInput);
+		const granularity: DateTrunc = "week";
+		const { start, end } = resolveSeriesRange(range, 12);
+
+		return cached(
+			cacheKey(
+				"dashboard:series:visits",
+				scope,
+				start.toISOString(),
+				end.toISOString(),
+				granularity
+			),
+			LIST_CACHE_TTL_MS,
+			["dashboard:visits", "dashboard:series"],
+			async () => {
+				const rows = await db
+					.select({
+						bucket: sql<Date>`date_trunc('week', ${visitTable.encounterDate})`,
+						value: sql<number>`count(*)::int`
+					})
+					.from(visitTable)
+					.innerJoin(patientTable, eq(visitTable.patientId, patientTable.id))
+					.where(
+						and(
+							patientScope(scope),
+							scope.providerId
+								? eq(visitTable.providerId, scope.providerId)
+								: undefined,
+							gte(visitTable.encounterDate, start),
+							lt(visitTable.encounterDate, end)
+						)
+					)
+					.groupBy(sql`date_trunc('week', ${visitTable.encounterDate})`)
+					.orderBy(asc(sql`date_trunc('week', ${visitTable.encounterDate})`));
+
+				return densifySeries(rows, start, end, granularity);
+			}
+		);
+	},
+
+	/**
+	 * New patients per month.
+	 * Defaults to 52 weeks (~12 months) for a cohort view.
+	 */
+	async getNewPatientsSeries(
+		scopeInput: ScopeInput = {},
+		range: SeriesRange = {}
+	): Promise<Array<InsightSeriesPoint>> {
+		const scope = resolveScope(scopeInput);
+		const granularity: DateTrunc = "month";
+		const { start, end } = resolveSeriesRange(range, 52);
+
+		return cached(
+			cacheKey(
+				"dashboard:series:new-patients",
+				scope,
+				start.toISOString(),
+				end.toISOString(),
+				granularity
+			),
+			LIST_CACHE_TTL_MS,
+			["dashboard:patients", "dashboard:series"],
+			async () => {
+				const rows = await db
+					.select({
+						bucket: sql<Date>`date_trunc('month', ${patientTable.createdAt})`,
+						value: sql<number>`count(*)::int`
+					})
+					.from(patientTable)
+					.where(
+						and(
+							patientScope(scope),
+							gte(patientTable.createdAt, start),
+							lt(patientTable.createdAt, end)
+						)
+					)
+					.groupBy(sql`date_trunc('month', ${patientTable.createdAt})`)
+					.orderBy(asc(sql`date_trunc('month', ${patientTable.createdAt})`));
+
+				return densifySeries(rows, start, end, granularity);
+			}
+		);
+	},
+
+	/**
+	 * Immunizations administered per ISO week.
+	 * Uses `administeredDate` when present, falls back to `createdAt`
+	 * so historical imports still land in the correct bucket.
+	 */
+	async getImmunizationsSeries(
+		scopeInput: ScopeInput = {},
+		range: SeriesRange = {}
+	): Promise<Array<InsightSeriesPoint>> {
+		const scope = resolveScope(scopeInput);
+		const granularity: DateTrunc = "week";
+		const { start, end } = resolveSeriesRange(range, 12);
+
+		return cached(
+			cacheKey(
+				"dashboard:series:immunizations",
+				scope,
+				start.toISOString(),
+				end.toISOString(),
+				granularity
+			),
+			LIST_CACHE_TTL_MS,
+			["dashboard:vaccinations", "dashboard:series"],
+			async () => {
+				const effectiveDate = sql`COALESCE(${vaccinationTable.administeredDate}, ${vaccinationTable.createdAt})`;
+
+				const rows = await db
+					.select({
+						bucket: sql<Date>`date_trunc('week', ${effectiveDate})`,
+						value: sql<number>`count(*)::int`
+					})
+					.from(vaccinationTable)
+					.innerJoin(
+						patientTable,
+						eq(vaccinationTable.patientId, patientTable.id)
+					)
+					.where(
+						and(
+							patientScope(scope),
+							scope.providerId
+								? eq(patientTable.pediatricianId, scope.providerId)
+								: undefined,
+							// Only count actually-administered doses, not scheduled ones.
+							eq(
+								immunizations.status,
+								status as "Administered" | "Due" | "Overdue"
+							),
+							gte(effectiveDate, start),
+							lt(effectiveDate, end)
+						)
+					)
+					.groupBy(sql`date_trunc('week', ${effectiveDate})`)
+					.orderBy(asc(sql`date_trunc('week', ${effectiveDate})`));
+
+				return densifySeries(rows, start, end, granularity);
+			}
+		);
+	},
+
+	/**
+	 * Revenue per ISO week.
+	 *
+	 * ⚠️ Requires a `payments` table with `paidAt` (timestamptz),
+	 * `amountCents` (integer), `status` (text), and `patientId` (text).
+	 * If your schema stores dollars, change the `value` SQL to `sum(...)`.
+	 */
+	async getRevenueSeries(
+		scopeInput: ScopeInput = {},
+		range: SeriesRange = {}
+	): Promise<Array<InsightSeriesPoint>> {
+		const scope = resolveScope(scopeInput);
+		const granularity: DateTrunc = "week";
+		const { start, end } = resolveSeriesRange(range, 12);
+
+		return cached(
+			cacheKey(
+				"dashboard:series:revenue",
+				scope,
+				start.toISOString(),
+				end.toISOString(),
+				granularity
+			),
+			LIST_CACHE_TTL_MS,
+			["dashboard:revenue", "dashboard:series"],
+			async () => {
+				const rows = await db
+					.select({
+						bucket: sql<Date>`date_trunc('week', ${paymentTable.paidAt})`,
+						// amountCents → dollars. Change to `sum(amount)` if you
+						// already store dollars.
+						value: sql<number>`COALESCE(sum(${paymentTable.amountCents}), 0)::int / 100`
+					})
+					.from(paymentTable)
+					.innerJoin(patientTable, eq(paymentTable.patientId, patientTable.id))
+					.where(
+						and(
+							patientScope(scope),
+							scope.providerId
+								? eq(patientTable.pediatricianId, scope.providerId)
+								: undefined,
+							eq(paymentTable.status, "Completed"),
+							gte(paymentTable.paidAt, start),
+							lt(paymentTable.paidAt, end)
+						)
+					)
+					.groupBy(sql`date_trunc('week', ${paymentTable.paidAt})`)
+					.orderBy(asc(sql`date_trunc('week', ${paymentTable.paidAt})`));
+
+				return densifySeries(rows, start, end, granularity);
+			}
+		);
+	},
+
+	// ------------------------------------------------------------------
 	// Stats (backed by the single `getAggregateStats` query)
 	// ------------------------------------------------------------------
 
-	async getTotalPatientsCount(scope: Scope = {}): Promise<number> {
-		return (await loadAggregateStats(scope)).totalPatients;
+	async getTotalPatientsCount(scopeInput: ScopeInput = {}): Promise<number> {
+		return (await loadAggregateStats(resolveScope(scopeInput))).totalPatients;
 	},
 
-	async getActivePatientsCount(scope: Scope = {}): Promise<number> {
-		return (await loadAggregateStats(scope)).activePatients;
+	async getActivePatientsCount(scopeInput: ScopeInput = {}): Promise<number> {
+		return (await loadAggregateStats(resolveScope(scopeInput))).activePatients;
 	},
 
 	// ------------------------------------------------------------------
 	// Appointment counts
 	// ------------------------------------------------------------------
 
-	async getAppointmentsThisWeekCount(scope: Scope = {}): Promise<number> {
-		return (await loadAggregateStats(scope)).appointmentsThisWeek;
+	async getAppointmentsThisWeekCount(
+		scopeInput: ScopeInput = {}
+	): Promise<number> {
+		return (await loadAggregateStats(resolveScope(scopeInput)))
+			.appointmentsThisWeek;
 	},
 
-	async getTodayAppointmentsCount(scope: Scope = {}): Promise<number> {
-		return (await loadAggregateStats(scope)).todayAppointments;
+	async getTodayAppointmentsCount(
+		scopeInput: ScopeInput = {}
+	): Promise<number> {
+		return (await loadAggregateStats(resolveScope(scopeInput)))
+			.todayAppointments;
 	},
 
-	async getAppointmentCompletionRate(scope: Scope = {}): Promise<number> {
-		return (await loadAggregateStats(scope)).completionRate;
+	async getAppointmentCompletionRate(
+		scopeInput: ScopeInput = {}
+	): Promise<number> {
+		return (await loadAggregateStats(resolveScope(scopeInput))).completionRate;
 	},
 
 	async getAppointmentsByDate(
 		date: Date,
-		scope: Scope = {},
+		scopeInput: ScopeInput = {},
 		options: { includeCompleted?: boolean; limit?: number } = {}
 	) {
+		const scope = resolveScope(scopeInput);
 		const { includeCompleted = false, limit = 20 } = options;
 		const { start, end } = utcDayRange(date);
 
@@ -337,8 +741,9 @@ export const dashboardRepository = {
 	async getAppointmentsByDateRange(
 		startDate: Date,
 		endDate: Date,
-		scope: Scope = {}
+		scopeInput: ScopeInput = {}
 	) {
+		const scope = resolveScope(scopeInput);
 		return cached(
 			cacheKey(
 				"dashboard:appointments:by-range",
@@ -383,11 +788,13 @@ export const dashboardRepository = {
 	// Encounters / visits
 	// ------------------------------------------------------------------
 
-	async getPendingFollowUpsCount(scope: Scope = {}): Promise<number> {
-		return (await loadAggregateStats(scope)).pendingFollowUps;
+	async getPendingFollowUpsCount(scopeInput: ScopeInput = {}): Promise<number> {
+		return (await loadAggregateStats(resolveScope(scopeInput)))
+			.pendingFollowUps;
 	},
 
-	async getRecentVisits(scope: Scope = {}, limit = 10, offset = 0) {
+	async getRecentVisits(scopeInput: ScopeInput = {}, limit = 10, offset = 0) {
+		const scope = resolveScope(scopeInput);
 		return cached(
 			cacheKey("dashboard:visits:recent", scope, limit, offset),
 			LIST_CACHE_TTL_MS,
@@ -421,11 +828,15 @@ export const dashboardRepository = {
 	// Immunizations
 	// ------------------------------------------------------------------
 
-	async getUpcomingVaccinationsCount(scope: Scope = {}): Promise<number> {
-		return (await loadAggregateStats(scope)).upcomingVaccinations;
+	async getUpcomingVaccinationsCount(
+		scopeInput: ScopeInput = {}
+	): Promise<number> {
+		return (await loadAggregateStats(resolveScope(scopeInput)))
+			.upcomingVaccinations;
 	},
 
-	async getOverdueVaccinations(scope: Scope = {}, limit = 5) {
+	async getOverdueVaccinations(scopeInput: ScopeInput = {}, limit = 5) {
+		const scope = resolveScope(scopeInput);
 		const today = utcDayRange();
 		return cached(
 			cacheKey(
@@ -469,14 +880,13 @@ export const dashboardRepository = {
 	// Recent activity (union)
 	// ------------------------------------------------------------------
 
-	async getRecentActivity(scope: Scope = {}, limit = 10) {
+	async getRecentActivity(scopeInput: ScopeInput = {}, limit = 10) {
+		const scope = resolveScope(scopeInput);
 		return cached(
 			cacheKey("dashboard:activity:recent", scope, limit),
 			LIST_CACHE_TTL_MS,
 			["dashboard:activity"],
 			async () => {
-				// Build each branch as a *subquery* so Drizzle can emit valid SQL
-				// for the outer `UNION ALL` and outer `ORDER BY`.
 				const encounters = db
 					.select({
 						id: visitTable.id,
@@ -561,7 +971,6 @@ export const dashboardRepository = {
 						)
 					);
 
-				// ✅ Chain on builders, THEN call .as() once.
 				const unioned = encounters
 					.unionAll(appointments)
 					.unionAll(immunizations)

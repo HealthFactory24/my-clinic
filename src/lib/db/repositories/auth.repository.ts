@@ -5,7 +5,7 @@ import { and, count, desc, eq, lte, ne, or, type SQL, sql } from "drizzle-orm";
 import { generateSecret, verify } from "otplib";
 
 import { invalidateRoleCache } from "#/lib/auth/role-cache.ts";
-import { db, type Transaction, withTransaction } from "#/lib/db";
+import { db, readCount, type Transaction, withTransaction } from "#/lib/db";
 import { queryCache } from "#/lib/db/cache";
 import { escapeRegExp } from "#/lib/db/cache.ts";
 import type {
@@ -30,9 +30,8 @@ import {
 	type Verification,
 	verification
 } from "#/lib/db/schema";
-import { readCount } from "#/lib/db/server.ts";
-import type { UserUpdate } from "#/lib/db/zod";
 import { createId } from "#/utils/id.ts";
+import type { UserUpdate } from "../zod";
 
 // ============================================================
 // Constants

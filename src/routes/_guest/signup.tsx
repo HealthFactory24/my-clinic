@@ -5,7 +5,6 @@ import { LoaderCircleIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
-import { ClinicLogo } from "#/components/logo.tsx";
 import { SignInSocialButton } from "#/components/sign-in-social-buttons";
 import { Button } from "#/components/ui/button";
 import { Input } from "#/components/ui/input";
@@ -13,6 +12,8 @@ import { Label } from "#/components/ui/label";
 import { authClient } from "#/lib/auth/auth-client";
 import { authQueryOptions } from "#/lib/auth/queries";
 import { Icons } from "@/components/ui/icons";
+
+import { ClinicLogo } from "../../components/logo";
 
 // Password validation helper
 const validatePassword = (

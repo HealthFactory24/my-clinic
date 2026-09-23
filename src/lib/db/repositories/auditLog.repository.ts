@@ -8,8 +8,9 @@ import type {
 	AuditEntity,
 	NewAuditLog
 } from "#/lib/db/schema/types.ts";
-import { db, readCount } from "#/lib/db/server.ts";
+import { db } from "#/lib/db/server.ts";
 import { createId } from "#/utils/id.ts";
+import { readCount } from "../../../utils";
 
 // ============================================================
 // Constants

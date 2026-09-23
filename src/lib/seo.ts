@@ -1,6 +1,6 @@
-import { ENV } from "varlock/env";
-
 import appConfig from "@/config/app.config";
+
+import { env } from "../env/client";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -61,7 +61,7 @@ export function generateAppSeo({
 	return { links: [], meta };
 }
 
-const publicUrl = ENV.VITE_BASE_URL.replace(/\/$/, "");
+const publicUrl = env.VITE_BASE_URL.replace(/\/$/, "");
 
 export const siteMetadata = {
 	description:

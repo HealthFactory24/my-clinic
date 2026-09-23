@@ -11,6 +11,7 @@ import {
 	text,
 	timestamp,
 	uniqueIndex,
+	uuid,
 	varchar
 } from "drizzle-orm/pg-core";
 
@@ -771,6 +772,31 @@ export const medicalRecords = pgTable(
 		index("idx_medical_records_uploaded_by").on(table.uploadedBy)
 	]
 );
+
+export const payments = pgTable(
+	"payments",
+	{
+		id: uuid("id").primaryKey().defaultRandom(),
+		patientId: text("patient_id")
+			.notNull()
+			.references(() => patients.id, { onDelete: "cascade" }),
+		amountCents: integer("amount_cents").notNull(),
+		status: text("status").notNull().default("Pending"),
+		paidAt: timestamp("paid_at", { withTimezone: true }),
+		createdAt: timestamp("created_at", { withTimezone: true })
+			.notNull()
+			.defaultNow()
+	},
+	t => [
+		index("payments_patient_idx").on(t.patientId),
+		index("payments_paid_at_idx").on(t.paidAt),
+		index("payments_status_idx").on(t.status)
+	]
+);
+
+export type Payment = typeof payments.$inferSelect;
+export type NewPayment = typeof payments.$inferInsert;
+
 export type PrescriptionItem = {
 	calculatedDoseMg?: number;
 	calculatedLiquidDoseMl: number;

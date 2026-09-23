@@ -12,6 +12,9 @@ import {
 	guardians,
 	immunizations,
 	labOrders,
+	MEDICAL_RECORD_STATUSES,
+	MEDICAL_RECORD_TYPES,
+	medicalRecords,
 	type NewAppointment,
 	type NewAuditLog,
 	type NewChronicCondition,
@@ -20,22 +23,25 @@ import {
 	type NewGuardian,
 	type NewImmunization,
 	type NewLabOrder,
+	type NewMedicalRecord,
 	type NewPatient,
 	type NewPatientAllergy,
+	type NewPayment,
 	type NewPrescription,
 	type NewStaff,
 	type NewVitalSigns,
 	patientAllergies,
 	patientChronicConditions,
 	patients,
+	payments,
 	prescriptions,
-	roleEnum,
 	type Staff,
+	staff,
 	type User,
 	vitals
 } from "@/lib/db/schema";
 
-import { db, withTransaction, type DBorTx } from "../lib/db/server";
+import { type DBorTx, db, withTransaction } from "../lib/db/server";
 
 // ============================================================
 // Configuration
@@ -53,6 +59,8 @@ const SEED_CONFIG = {
 	prescriptionsPerPatient: { min: 1, max: 5 },
 	labsPerPatient: { min: 1, max: 4 },
 	appointmentsPerPatient: { min: 1, max: 3 },
+	medicalRecordsPerPatient: { min: 1, max: 3 },
+	paymentsPerPatient: { min: 1, max: 2 },
 	auditLogs: 50
 } as const;
 
@@ -61,7 +69,7 @@ const INSERT_BATCH_SIZE = 500;
 
 type Bootstrap = {
 	clinic: Clinic;
-	staff: Staff[];
+	staff: Array<Staff | NewStaff>;
 	staffIds: string[];
 	staffNames: Record<string, string>;
 };
@@ -163,105 +171,6 @@ function ageMonthsFromDOB(dob: string): number {
 		(now.getMonth() - birth.getMonth())
 	);
 }
-// async function verifySeededTables(): Promise<void> {
-// 	const tables = [
-// 		["clinics", clinics],
-// 		["user", userTable],
-// 		["staff", staff],
-// 		["patients", patients],
-// 		["guardians", guardians],
-// 		["patient allergies", patientAllergies],
-// 		["chronic conditions", patientChronicConditions],
-// 		["encounters", encounters],
-// 		["appointments", appointments],
-// 		["vitals", vitals],
-// 		["growth measurements", growthMeasurements],
-// 		["immunizations", immunizations],
-// 		["prescriptions", prescriptions],
-// 		["lab orders", labOrders],
-// 		["audit logs", auditLogs]
-// 	] as const;
-
-// 	for (const [name, table] of tables) {
-// 		const [row] = await db.select({ count: sql<number>`count(*)` }).from(table);
-
-// 		// Coerce the string/bigint to a proper JavaScript number
-// 		const count = row?.count ?? 0;
-
-// 		if (count === 0) {
-// 			throw new Error(`Seed verification failed: ${name} is empty`);
-// 		}
-
-// 		console.log(`  ✅ Verified ${name}: ${count} rows`);
-// 	}
-// }
-
-// // ============================================================
-// // Helper Functions
-// // ============================================================
-
-// const PEDIATRIC_AGE_GROUPS = [
-// 	{ label: "Neonate", minMonths: 0, maxMonths: 1 },
-// 	{ label: "Infant", minMonths: 1, maxMonths: 12 },
-// 	{ label: "Toddler", minMonths: 12, maxMonths: 36 },
-// 	{ label: "Preschooler", minMonths: 36, maxMonths: 72 },
-// 	{ label: "School Age", minMonths: 72, maxMonths: 144 },
-// 	{ label: "Adolescent", minMonths: 144, maxMonths: 216 }
-// ];
-
-// function getRandomAgeGroup() {
-// 	const group = faker.helpers.arrayElement(PEDIATRIC_AGE_GROUPS);
-// 	const months = faker.number.int({
-// 		min: group.minMonths,
-// 		max: group.maxMonths
-// 	});
-// 	return months;
-// }
-
-// function getDOBFromAgeMonths(ageMonths: number): string {
-// 	const date = new Date();
-// 	date.setMonth(date.getMonth() - ageMonths);
-// 	return date.toISOString();
-// }
-
-// function getAgeMonthsFromDOB(dob: string): number {
-// 	const birthDate = new Date(dob);
-// 	const now = new Date();
-// 	return (
-// 		(now.getFullYear() - birthDate.getFullYear()) * 12 +
-// 		(now.getMonth() - birthDate.getMonth())
-// 	);
-// }
-
-// const usedMRNs = new Set<string>();
-// const usedRxNumbers = new Set<string>();
-// const usedLabOrderNumbers = new Set<string>();
-
-// function generateUniqueNumber(prefix: string, used: Set<string>): string {
-// 	let value: string;
-// 	do {
-// 		value = `${prefix}-${new Date().getFullYear()}-${faker.string.numeric(4)}`;
-// 	} while (used.has(value));
-// 	used.add(value);
-// 	return value;
-// }
-
-// function generateMRN(): string {
-// 	return generateUniqueNumber("PED", usedMRNs);
-// }
-
-// function generateRxNumber(): string {
-// 	return generateUniqueNumber("RX", usedRxNumbers);
-// }
-
-// function generateLabOrderNumber(): string {
-// 	return generateUniqueNumber("LAB", usedLabOrderNumbers);
-// }
-
-// function randomDate(start: Date, end: Date): Date {
-// 	return faker.date.between({ from: start, to: end });
-// }
-
 function requiredAt<T>(values: Array<T>, index: number, label: string): T {
 	const value = values[index];
 	if (value === undefined)
@@ -304,15 +213,14 @@ const AVATAR_COLORS = [
 // Generate Users (First - required for foreign keys)
 // ============================================================
 
-function generateUsers(count: number) {
+function generateStaffUsers(count: number): Array<User> {
 	const users: Array<User> = [];
-	// const roles = ["doctor", "staff", "admin", "patient"] ;
 
 	for (let i = 0; i < count; i += 1) {
 		const firstName = faker.person.firstName();
 		const lastName = faker.person.lastName();
 		users.push({
-			id: `user-${faker.string.alphanumeric(8)}`,
+			id: `user-staff-${faker.string.alphanumeric(8)}`,
 			name: `${firstName} ${lastName}`,
 			email: faker.internet.email({ firstName, lastName }),
 			emailVerified: faker.datatype.boolean({ probability: 0.9 }),
@@ -320,14 +228,20 @@ function generateUsers(count: number) {
 			createdAt: new Date(),
 			updatedAt: new Date(),
 			banned: faker.datatype.boolean({ probability: 0.05 }),
-			banExpires: faker.date.future(),
-			banReason: faker.lorem.sentence(),
+			banExpires: faker.datatype.boolean({ probability: 0.1 })
+				? faker.date.future()
+				: null,
+			banReason: faker.datatype.boolean({ probability: 0.1 })
+				? faker.lorem.sentence()
+				: null,
 			address: faker.location.streetAddress(),
 			phone: faker.phone.number(),
 			twoFactorEnabled: faker.datatype.boolean({ probability: 0.2 }),
-			apiKey: faker.string.alphanumeric(32),
-			role: faker.helpers.arrayElement(roleEnum.enumValues),
-			clinicId: `clinic-${faker.string.alphanumeric(8)}`
+			apiKey: faker.datatype.boolean({ probability: 0.3 })
+				? faker.string.alphanumeric(32)
+				: null,
+			role: pickOne(["doctor", "staff"] as const),
+			clinicId: CLINIC_ID
 		});
 	}
 	return users;
@@ -634,6 +548,8 @@ function generateStaff(userIds: Array<string>): Array<NewStaff> {
 			licenseNumber: `MD-${faker.string.numeric(6)}`,
 			avatarColor: faker.helpers.arrayElement(AVATAR_COLORS),
 			pinHash: faker.string.alphanumeric(64),
+			clinicId: CLINIC_ID,
+			phone: faker.phone.number(),
 			userId,
 			email: faker.internet.email({
 				firstName,
@@ -1357,6 +1273,96 @@ function generateLabOrders(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Medical records
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MEDICAL_RECORD_FILES = [
+	{ mime: "application/pdf", ext: ".pdf" },
+	{ mime: "image/png", ext: ".png" },
+	{ mime: "image/jpeg", ext: ".jpg" },
+	{ mime: "application/msword", ext: ".doc" }
+] as const;
+
+function generateMedicalRecords(
+	patientIds: string[],
+	encounterIds: string[],
+	bootstrap: Bootstrap
+): Array<NewMedicalRecord> {
+	const out: Array<NewMedicalRecord> = [];
+
+	for (const patientId of patientIds) {
+		const count = faker.number.int({
+			min: SEED_CONFIG.medicalRecordsPerPatient.min,
+			max: SEED_CONFIG.medicalRecordsPerPatient.max
+		});
+
+		for (let i = 0; i < count; i += 1) {
+			const file = pickOne(MEDICAL_RECORD_FILES);
+			const recordType = pickOne(MEDICAL_RECORD_TYPES);
+
+			out.push({
+				id: `rec-${faker.string.alphanumeric(8)}`,
+				patientId,
+				encounterId:
+					encounterIds.length > 0 &&
+					faker.datatype.boolean({ probability: 0.6 })
+						? pickOne(encounterIds)
+						: null,
+				uploadedBy: pickOne(bootstrap.staffIds),
+				recordType,
+				title: `${recordType} — ${faker.lorem.words(3)}`,
+				description: faker.helpers.maybe(() => faker.lorem.sentence()) ?? null,
+				fileUrl: `https://storage.demo/fake/${faker.string.alphanumeric(16)}${file.ext}`,
+				fileName: `${recordType.replace(/\s+/g, "-").toLowerCase()}-${faker.string.alphanumeric(6)}${file.ext}`,
+				fileMimeType: file.mime,
+				fileSizeBytes: faker.number.int({ min: 50_000, max: 4_000_000 }),
+				externalId: faker.datatype.boolean({ probability: 0.3 })
+					? `EXT-${faker.string.alphanumeric(10).toUpperCase()}`
+					: null,
+				externalSystem: "demo-ehr",
+				documentDate: faker.date.past({ years: 1 }).toISOString(),
+				status: pickOne(MEDICAL_RECORD_STATUSES),
+				metadata: {},
+				tags: faker.helpers.arrayElements(
+					["lab", "imaging", "referral", "consent", "insurance"],
+					2
+				),
+				createdAt: new Date(),
+				updatedAt: new Date()
+			});
+		}
+	}
+	return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Payments
+// ═══════════════════════════════════════════════════════════════════════════
+
+function generatePayments(patientIds: string[]): Array<NewPayment> {
+	const out: Array<NewPayment> = [];
+
+	for (const patientId of patientIds) {
+		const count = faker.number.int({
+			min: SEED_CONFIG.paymentsPerPatient.min,
+			max: SEED_CONFIG.paymentsPerPatient.max
+		});
+
+		for (let i = 0; i < count; i += 1) {
+			const isPaid = faker.datatype.boolean({ probability: 0.8 });
+			out.push({
+				patientId,
+				amountCents: faker.number.int({ min: 5000, max: 60000 }),
+				status: isPaid ? "Completed" : "Pending",
+				paidAt: isPaid ? faker.date.recent({ days: 90 }) : null,
+				createdAt: faker.date.recent({ days: 120 })
+			});
+		}
+	}
+	return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Audit logs
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1420,6 +1426,8 @@ function generateAuditLogs(
 async function clearDemoData(): Promise<void> {
 	// Order matters: children before parents.
 	await db.delete(auditLogs);
+	await db.delete(payments);
+	await db.delete(medicalRecords);
 	await db.delete(appointments);
 	await db.delete(labOrders);
 	await db.delete(prescriptions);
@@ -1443,10 +1451,22 @@ async function clearDemoData(): Promise<void> {
 		await db.delete(userTable).where(eq(userTable.id, u.id));
 	}
 
+	// Demo staff rows cascade from their users (staff.user_id ON DELETE
+	// CASCADE). Encounters/prescriptions/records referencing them were
+	// already deleted above.
+	const demoStaffUsers = await db
+		.select({ id: userTable.id })
+		.from(userTable)
+		.where(sql`${userTable.id} LIKE 'user-staff-%'`);
+	for (const u of demoStaffUsers) {
+		await db.delete(userTable).where(eq(userTable.id, u.id));
+	}
+
 	await db.delete(patients);
 }
 
 function logSummary(counts: {
+	staff: number;
 	patients: number;
 	guardians: number;
 	allergies: number;
@@ -1458,10 +1478,13 @@ function logSummary(counts: {
 	immunizations: number;
 	prescriptions: number;
 	labs: number;
+	medicalRecords: number;
+	payments: number;
 	auditLogs: number;
 }): void {
 	console.log(`
 📊 Demo data summary:
+   👨‍⚕️ Staff:             ${counts.staff}
    👶 Patients:            ${counts.patients}
    👨‍👩‍👧 Guardians:           ${counts.guardians}
    💊 Allergies:           ${counts.allergies}
@@ -1473,6 +1496,8 @@ function logSummary(counts: {
    💉 Immunizations:       ${counts.immunizations}
    💊 Prescriptions:       ${counts.prescriptions}
    🧪 Lab orders:          ${counts.labs}
+   📄 Medical records:     ${counts.medicalRecords}
+   💳 Payments:            ${counts.payments}
    📋 Audit logs:          ${counts.auditLogs}
 `);
 }
@@ -1488,9 +1513,29 @@ export async function seedDatabase(): Promise<void> {
 	usedIds.rx.clear();
 	usedIds.lab.clear();
 
-	const bootstrap = await loadBootstrap();
+	const baseBootstrap = await loadBootstrap();
 	console.log(
-		`  ✅ Found clinic "${bootstrap.clinic.name}" and ${bootstrap.staff.length} staff`
+		`  ✅ Found clinic "${baseBootstrap.clinic.name}" and ${baseBootstrap.staff.length} staff`
+	);
+
+	// Demo staff (users + profiles) scoped to the canonical clinic. The admin
+	// seeder already created one staff member; these add color to providers.
+	const staffUsers = generateStaffUsers(SEED_CONFIG.staff);
+	const staffRows = generateStaff(staffUsers.map(u => u.id));
+	const bootstrap: Bootstrap = {
+		clinic: baseBootstrap.clinic,
+		staff: [...baseBootstrap.staff, ...staffRows],
+		staffIds: [
+			...baseBootstrap.staffIds,
+			...staffRows.map(s => s.id as string)
+		],
+		staffNames: {
+			...baseBootstrap.staffNames,
+			...Object.fromEntries(staffRows.map(s => [s.id, s.name]))
+		}
+	};
+	console.log(
+		`  👨‍⚕️ Using ${bootstrap.staff.length} staff (incl. ${staffRows.length} seeded)`
 	);
 
 	await clearDemoData();
@@ -1521,12 +1566,22 @@ export async function seedDatabase(): Promise<void> {
 		weights
 	);
 	const labRows = generateLabOrders(patientIds, bootstrap);
+	const medicalRecordRows = generateMedicalRecords(
+		patientIds,
+		encounterIds,
+		bootstrap
+	);
+	const paymentRows = generatePayments(patientIds);
 	const auditRows = generateAuditLogs(bootstrap, patientIds);
 
 	// ── Persist everything in a single transaction, so a failure mid-way
 	//    leaves the DB unchanged. ──────────────────────────────────────────
 	await withTransaction(async tx => {
-		// Per-patient user rows first — `patients.user_id` references them.
+		// Staff first — patients and records reference them.
+		if (staffUsers.length > 0) await insertBatched(tx, userTable, staffUsers);
+		if (staffRows.length > 0) await insertBatched(tx, staff, staffRows);
+
+		// Per-patient user rows next — `patients.user_id` references them.
 		for (let i = 0; i < patientUsers.length; i += INSERT_BATCH_SIZE) {
 			await tx
 				.insert(userTable)
@@ -1563,12 +1618,17 @@ export async function seedDatabase(): Promise<void> {
 			await insertBatched(tx, prescriptions, prescriptionRows);
 		}
 		if (labRows.length > 0) await insertBatched(tx, labOrders, labRows);
+		if (medicalRecordRows.length > 0) {
+			await insertBatched(tx, medicalRecords, medicalRecordRows);
+		}
+		if (paymentRows.length > 0) await insertBatched(tx, payments, paymentRows);
 		if (auditRows.length > 0) await insertBatched(tx, auditLogs, auditRows);
 	});
 
 	console.log("  ✅ Inserted all demo rows");
 
 	logSummary({
+		staff: staffRows.length,
 		patients: patientRows.length,
 		guardians: guardianRows.length,
 		allergies: allergyRows.length,
@@ -1580,6 +1640,8 @@ export async function seedDatabase(): Promise<void> {
 		immunizations: immunizationRows.length,
 		prescriptions: prescriptionRows.length,
 		labs: labRows.length,
+		medicalRecords: medicalRecordRows.length,
+		payments: paymentRows.length,
 		auditLogs: auditRows.length
 	});
 

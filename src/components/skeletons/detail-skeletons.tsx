@@ -129,7 +129,32 @@ export function PrescriptionDetailSkeleton() {
 		</div>
 	);
 }
-
+export function ClinicAnalyticsSkeleton() {
+	return (
+		<div className='space-y-6'>
+			<div className='space-y-2'>
+				<Skeleton className='h-8 w-64' />
+				<Skeleton className='h-4 w-96' />
+			</div>
+			<div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-4'>
+				{[0, 1, 2, 3].map(i => (
+					<Skeleton
+						className='h-28'
+						key={i}
+					/>
+				))}
+			</div>
+			<div className='grid gap-6 lg:grid-cols-2'>
+				{[0, 1, 2, 3].map(i => (
+					<Skeleton
+						className='h-80'
+						key={i}
+					/>
+				))}
+			</div>
+		</div>
+	);
+}
 // ============================================================
 // Patient Skeletons
 // ============================================================
