@@ -1,0 +1,58 @@
+# ==============================================================================
+# Optimized bunfig.toml for Local-First Monorepo Performance (Debian 13 / Bun)
+# ==============================================================================
+
+[install]
+linker = "isolated"
+logLevel = "error"
+smol = false # Set to false to prioritize execution speed over minimal memory
+telemetry = false
+exact = false
+frozenLockfile = false
+auto = "auto"
+
+[install.cache]
+dir = "/home/hazemali/.bun/install/cache"
+disable = false # Keep cache enabled for lightning-fast incremental builds
+cache = "auto" # Let Bun manage cache optimally instead of forcing misses
+
+[install.lockfile]
+save = true
+[install.scopes]
+# Alias for TypeScript 6 compatibility
+"@typescript/typescript6" = "npm:@typescript/typescript6"
+"@typescript/native" = "npm:typescript"
+# ==============================================================================
+# Runtime & Transpiler Settings
+# ==============================================================================
+jsx = "react-jsx"
+jsxImportSource = "react"
+
+[define]
+"global" = "globalThis"
+
+# ==============================================================================
+# Asset Loaders
+# ==============================================================================
+[loader]
+".css" = "text"
+".module.css" = "text"
+".svg" = "file"
+".png" = "file"
+".jpg" = "file"
+".jpeg" = "file"
+".gif" = "file"
+".webp" = "file"
+".woff" = "file"
+".woff2" = "file"
+".ttf" = "file"
+".otf" = "file"
+
+# ==============================================================================
+# Node.js Compatibility Layer
+# ==============================================================================
+[node]
+compat = true
+
+[test]
+root = "./src"
